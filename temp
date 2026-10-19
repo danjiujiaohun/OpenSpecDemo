@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""摄氏度与华氏度双向换算。
+
+仅依赖 Python 标准库。输出为纯 ASCII，便于复制和管道处理。
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import sys
+
+DEFAULT_PRECISION = 4
+MIN_PRECISION = 0
+MAX_PRECISION = 10
+
+CELSIUS_ABSOLUTE_ZERO = -273.15
+FAHRENHEIT_ABSOLUTE_ZERO = -459.67
+
+
+class TempError(Exception):
+    """可预期错误：向用户报告后以非零状态退出。"""
+
+
+def parse_temperature(value: str) -> float:
+    """把命令行文本解析为有限浮点数，否则抛出 TempError。"""
+    try:
+        number = float(value)
+    except ValueError:
+        raise TempError(f"数值无效: {value}") from None
+    if not math.isfinite(number):
+        raise TempError(f"数值无效: {value}")
+    return number
+
+
+def c2f(celsius: float) -> float:
+    return celsius * 9 / 5 + 32
+
+
+def f2c(fahrenheit: float) -> float:
+    return (fahrenheit - 32) * 5 / 9
+
+
+def format_value(value: float, precision: int) -> str:
+    """按小数位格式化，去掉尾零，并把负零归一化为 0。"""
+    text = f"{value:.{precision}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text in ("-0", ""):
+        text = "0"
+    return text
+
+
+def convert(value: str, converter, precision: int, absolute_zero: float, unit: str) -> str:
+    number = parse_temperature(value)
+    if number < absolute_zero:
+        raise TempError(f"温度低于绝对零度（{absolute_zero:g} {unit}）")
+    result = converter(number)
+    if not math.isfinite(result):
+        raise TempError("结果超出可表示范围")
+    return format_value(result, precision)
+
+
+def cmd_c2f(args) -> int:
+    result = convert(args.value, c2f, args.precision, CELSIUS_ABSOLUTE_ZERO, "C")
+    print(f"{result} F")
+    return 0
+
+
+def cmd_f2c(args) -> int:
+    result = convert(args.value, f2c, args.precision, FAHRENHEIT_ABSOLUTE_ZERO, "F")
+    print(f"{result} C")
+    return 0
+
+
+def _precision(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"精度必须是整数: {value}") from None
+    if not MIN_PRECISION <= number <= MAX_PRECISION:
+        raise argparse.ArgumentTypeError(
+            f"精度必须在 {MIN_PRECISION} 到 {MAX_PRECISION} 之间: {value}"
+        )
+    return number
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="temp", description="摄氏度与华氏度双向换算")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+
+    c2f_parser = subparsers.add_parser("c2f", help="摄氏度转为华氏度")
+    c2f_parser.add_argument("value", help="摄氏温度")
+    c2f_parser.add_argument(
+        "--precision",
+        type=_precision,
+        default=DEFAULT_PRECISION,
+        metavar="N",
+        help=f"小数位数 ({MIN_PRECISION}-{MAX_PRECISION}，默认 {DEFAULT_PRECISION})",
+    )
+    c2f_parser.set_defaults(func=cmd_c2f)
+
+    f2c_parser = subparsers.add_parser("f2c", help="华氏度转为摄氏度")
+    f2c_parser.add_argument("value", help="华氏温度")
+    f2c_parser.add_argument(
+        "--precision",
+        type=_precision,
+        default=DEFAULT_PRECISION,
+        metavar="N",
+        help=f"小数位数 ({MIN_PRECISION}-{MAX_PRECISION}，默认 {DEFAULT_PRECISION})",
+    )
+    f2c_parser.set_defaults(func=cmd_f2c)
+
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return 0
+    try:
+        return args.func(args)
+    except TempError as exc:
+        print(f"temp: error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

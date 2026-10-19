@@ -96,10 +96,45 @@ mv ~/.local/share/todo/todos.json ~/.local/share/todo/todos.json.broken
 todo list
 ```
 
+## 温度换算（temp）
+
+仓库还附带一个独立的温度换算命令 `temp`，与 `todo` 互不依赖，同样只使用 Python 标准库。
+
+安装：
+
+```bash
+chmod +x temp
+ln -sf "$PWD/temp" ~/.local/bin/temp
+```
+
+使用：
+
+```bash
+temp c2f 100                # 212 F
+temp f2c 212                # 100 C
+temp c2f 37                 # 98.6 F
+temp f2c 1                  # -17.2222 C
+temp f2c --precision 2 1    # -17.22 C
+temp c2f --precision 0 37   # 99 F
+```
+
+约定：
+
+- 默认最多保留 4 位小数，去掉尾零；整数结果不带小数点。
+- 输出为纯 ASCII，数值与单位 `C` / `F` 之间以一个空格分隔。
+- 输入无效、低于绝对零度或结果溢出时报错到 stderr，并以非零状态码退出。
+- `nan`、`inf` 不作为有效温度。
+
+也可以直接运行仓库里的脚本，不安装：
+
+```bash
+./temp c2f 100
+```
+
 ## 测试
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-测试通过临时 `XDG_DATA_HOME` 隔离数据，不会影响真实待办。
+`todo` 的测试通过临时 `XDG_DATA_HOME` 隔离数据，不会影响真实待办；`temp` 的测试不需要数据目录。
