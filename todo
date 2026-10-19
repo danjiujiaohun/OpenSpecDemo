@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""纯本地、单人的终端待办清单。
+
+数据保存在 $XDG_DATA_HOME/todo/todos.json，未设置时使用
+~/.local/share/todo/todos.json。仅依赖 Python 标准库。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+DATE_FORMAT = "%Y-%m-%d"
+DATA_VERSION = 1
+
+
+class TodoError(Exception):
+    """可预期错误：向用户报告后以非零状态退出。"""
+
+
+def data_path() -> Path:
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
+    return base / "todo" / "todos.json"
+
+
+def empty_data() -> dict:
+    return {"version": DATA_VERSION, "next_id": 1, "items": []}
+
+
+def _now() -> str:
+    return datetime.now().strftime(TIME_FORMAT)
+
+
+def _validate(data, path: Path) -> None:
+    valid = (
+        isinstance(data, dict)
+        and isinstance(data.get("next_id"), int)
+        and isinstance(data.get("items"), list)
+    )
+    if valid:
+        for item in data["items"]:
+            valid = (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), int)
+                and isinstance(item.get("text"), str)
+                and isinstance(item.get("created_at"), str)
+                and (item.get("completed_at") is None or isinstance(item.get("completed_at"), str))
+            )
+            if not valid:
+                break
+    if not valid:
+        raise TodoError(f"数据文件格式无效: {path}")
+
+
+def load_data(path: Path) -> dict:
+    if not path.exists():
+        data = empty_data()
+        save_data(path, data)
+        return data
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise TodoError(f"无法读取数据文件 {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise TodoError(f"数据文件不是合法 JSON，未做任何修改: {path} ({exc})") from exc
+    _validate(data, path)
+    return data
+
+
+def save_data(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".todos-", suffix=".json", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def find_item(data: dict, item_id: int) -> dict:
+    for item in data["items"]:
+        if item["id"] == item_id:
+            return item
+    raise TodoError(f"找不到 id 为 {item_id} 的待办")
+
+
+def _format_time(timestamp: str) -> str:
+    return timestamp[11:16] if len(timestamp) >= 16 else timestamp
+
+
+def _print_grouped(items: list[dict], show_completion: bool) -> None:
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        groups.setdefault(item["created_at"][:10], []).append(item)
+
+    for date in sorted(groups, reverse=True):
+        print(date)
+        for item in sorted(groups[date], key=lambda entry: (entry["created_at"], entry["id"])):
+            mark = "x" if item["completed_at"] else " "
+            line = f"  [{mark}]  {item['id']:<3}  {item['text']:<20}  {_format_time(item['created_at'])}"
+            if show_completion and item["completed_at"]:
+                line += f" -> {_format_time(item['completed_at'])}"
+            print(line)
+
+
+def cmd_add(args) -> int:
+    text = args.text.strip()
+    if not text:
+        raise TodoError("待办内容不能为空")
+
+    path = data_path()
+    data = load_data(path)
+    item = {
+        "id": data["next_id"],
+        "text": text,
+        "created_at": _now(),
+        "completed_at": None,
+    }
+    data["items"].append(item)
+    data["next_id"] += 1
+    save_data(path, data)
+    print(f"已添加 #{item['id']}: {text}")
+    return 0
+
+
+def cmd_list(args) -> int:
+    data = load_data(data_path())
+    pending = [item for item in data["items"] if not item["completed_at"]]
+    if pending:
+        _print_grouped(pending, show_completion=False)
+        print()
+    print(f"{len(pending)} 条未完成")
+    return 0
+
+
+def cmd_done(args) -> int:
+    path = data_path()
+    data = load_data(path)
+    item = find_item(data, args.id)
+    if item["completed_at"]:
+        print(f"#{item['id']} 已完成，完成时间 {_format_time(item['completed_at'])}")
+        return 0
+    item["completed_at"] = _now()
+    save_data(path, data)
+    print(f"已完成 #{item['id']}: {item['text']}")
+    return 0
+
+
+def cmd_undone(args) -> int:
+    path = data_path()
+    data = load_data(path)
+    item = find_item(data, args.id)
+    if item["completed_at"] is None:
+        print(f"#{item['id']} 已经是未完成状态")
+        return 0
+    item["completed_at"] = None
+    save_data(path, data)
+    print(f"已重新打开 #{item['id']}: {item['text']}")
+    return 0
+
+
+def cmd_rm(args) -> int:
+    path = data_path()
+    data = load_data(path)
+    item = find_item(data, args.id)
+    data["items"].remove(item)
+    save_data(path, data)
+    print(f"已删除 #{item['id']}: {item['text']}")
+    return 0
+
+
+def cmd_history(args) -> int:
+    data = load_data(data_path())
+    items = data["items"]
+    if args.date:
+        items = [item for item in items if item["created_at"][:10] == args.date]
+
+    if not items:
+        if args.date:
+            print(f"{args.date} 没有记录")
+        else:
+            print("共 0 条记录")
+        return 0
+
+    _print_grouped(items, show_completion=True)
+    print()
+    print(f"共 {len(items)} 条记录")
+    return 0
+
+
+def _positive_id(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"id 必须是整数: {value}")
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"id 必须是正整数: {value}")
+    return number
+
+
+def _valid_date(value: str) -> str:
+    try:
+        datetime.strptime(value, DATE_FORMAT)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"日期格式应为 YYYY-MM-DD: {value}")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="todo", description="纯本地个人待办清单")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+
+    add_parser = subparsers.add_parser("add", help="添加一条待办")
+    add_parser.add_argument("text", help="待办内容")
+    add_parser.set_defaults(func=cmd_add)
+
+    list_parser = subparsers.add_parser("list", help="查看所有未完成待办")
+    list_parser.set_defaults(func=cmd_list)
+
+    done_parser = subparsers.add_parser("done", help="标记待办为已完成")
+    done_parser.add_argument("id", type=_positive_id, help="待办 id")
+    done_parser.set_defaults(func=cmd_done)
+
+    undone_parser = subparsers.add_parser("undone", help="撤销完成状态")
+    undone_parser.add_argument("id", type=_positive_id, help="待办 id")
+    undone_parser.set_defaults(func=cmd_undone)
+
+    rm_parser = subparsers.add_parser("rm", help="删除一条待办")
+    rm_parser.add_argument("id", type=_positive_id, help="待办 id")
+    rm_parser.set_defaults(func=cmd_rm)
+
+    history_parser = subparsers.add_parser("history", help="查看全部历史记录")
+    history_parser.add_argument("--date", type=_valid_date, help="只看某天创建的记录 (YYYY-MM-DD)")
+    history_parser.set_defaults(func=cmd_history)
+
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        parser.print_help()
+        return 0
+    try:
+        return args.func(args)
+    except TodoError as exc:
+        print(f"todo: error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
